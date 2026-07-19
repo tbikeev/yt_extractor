@@ -35,6 +35,18 @@ The start script builds:
 
 Data (videos, thumbs, SQLite DB) lives in `./data/` on the host.
 
+### macOS: “keychain cannot be accessed” / credential errors
+
+Docker Desktop stores Hub credentials in the login keychain. If the keychain is locked (common in some terminal sessions), image pulls fail.
+
+```bash
+security unlock-keychain ~/Library/Keychains/login.keychain-db
+./scripts/start.sh
+```
+
+Or open Docker Desktop and sign in, then retry.  
+`./scripts/start.sh` will automatically fall back to local mode if the pull still fails (unless you set `FORCE_DOCKER=1`).
+
 ## Dev mode (no Docker)
 
 Needs Python 3.11+, `ffmpeg`, and `yt-dlp`:
@@ -42,6 +54,8 @@ Needs Python 3.11+, `ffmpeg`, and `yt-dlp`:
 ```bash
 ./scripts/dev.sh
 ```
+
+On macOS with Homebrew: `brew install ffmpeg yt-dlp` (Python 3 is usually already present).
 
 ## Usage
 
