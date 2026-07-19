@@ -216,6 +216,46 @@ def should_use_docker() -> bool:
     return docker_available()
 
 
+def detect_js_runtime() -> tuple[str | None, str | None]:
+    """Return (runtime_name, path) for yt-dlp --js-runtimes. Prefer node, then deno."""
+    node = shutil.which("node")
+    if node:
+        return "node", node
+    deno = shutil.which("deno")
+    if deno:
+        return "deno", deno
+    return None, None
+
+
+def js_runtime_args() -> list[str]:
+    name, path = detect_js_runtime()
+    if not name:
+        return []
+    # Explicit path helps when PATH differs inside docker vs host.
+    return ["--js-runtimes", f"{name}:{path}" if path else name]
+
+
+def common_ytdlp_flags() -> list[str]:
+    """Shared robustness flags for YouTube (JS runtime, retries, rate limits)."""
+    flags = [
+        "--no-playlist",
+        "--retries",
+        "10",
+        "--fragment-retries",
+        "10",
+        "--extractor-retries",
+        "5",
+        "--retry-sleep",
+        "http:linear=2:20:2",
+        "--sleep-requests",
+        "1",
+        "--socket-timeout",
+        "30",
+        *js_runtime_args(),
+    ]
+    return flags
+
+
 def yt_dlp_cmd(args: list[str], workdir: Path) -> list[str]:
     """Build either a dockerized or local yt-dlp command."""
     if should_use_docker():
@@ -242,6 +282,15 @@ def run_cmd(cmd: list[str], cwd: Path | None = None, timeout: int = 3600) -> sub
         timeout=timeout,
         check=False,
     )
+
+
+def cmd_output(result: subprocess.CompletedProcess[str]) -> str:
+    return ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
+
+
+def looks_like_rate_limit(text: str) -> bool:
+    lower = text.lower()
+    return "429" in lower or "too many requests" in lower
 
 
 def parse_vtt(path: Path) -> list[dict[str, Any]]:
@@ -468,6 +517,78 @@ def update_job(job_id: str, **fields: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def out_template(youtube_id: str) -> str:
+    # Inside the downloader container the workdir is /out (volume-mounted).
+    if should_use_docker():
+        return f"/out/{youtube_id}.%(ext)s"
+    return f"{youtube_id}.%(ext)s"
+
+
+async def download_video_media(youtube_id: str, out_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Download video + metadata only (no subs) so subtitle 429s cannot abort the file."""
+    args = [
+        *common_ytdlp_flags(),
+        "--write-info-json",
+        "--write-thumbnail",
+        "--convert-thumbnails",
+        "jpg",
+        "--embed-metadata",
+        "--no-write-subs",
+        "--no-write-auto-subs",
+        "-f",
+        "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "--merge-output-format",
+        "mp4",
+        "-o",
+        out_template(youtube_id),
+        f"https://www.youtube.com/watch?v={youtube_id}",
+    ]
+    cmd = yt_dlp_cmd(args, out_dir)
+    return await asyncio.to_thread(run_cmd, cmd, out_dir if not should_use_docker() else None)
+
+
+async def download_subtitles(
+    youtube_id: str, out_dir: Path, language: str, attempts: int = 4
+) -> tuple[bool, str]:
+    """Fetch subs separately with backoff. Returns (ok, message). Never raises."""
+    sub_langs = f"{language}.*,{language},en.*,en"
+    last_err = ""
+    for attempt in range(1, attempts + 1):
+        args = [
+            *common_ytdlp_flags(),
+            "--skip-download",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-langs",
+            sub_langs,
+            "--sub-format",
+            "vtt/best",
+            "--sleep-subtitles",
+            "2",
+            "--ignore-errors",
+            "-o",
+            out_template(youtube_id),
+            f"https://www.youtube.com/watch?v={youtube_id}",
+        ]
+        cmd = yt_dlp_cmd(args, out_dir)
+        result = await asyncio.to_thread(run_cmd, cmd, out_dir if not should_use_docker() else None)
+        output = cmd_output(result)
+        if find_subtitle_file(out_dir, youtube_id):
+            return True, "Subtitles downloaded"
+        if result.returncode == 0:
+            return False, "No subtitles available for this video"
+        last_err = output[-1000:] or "subtitle download failed"
+        if looks_like_rate_limit(output) and attempt < attempts:
+            wait = min(60, 5 * attempt * attempt)
+            await asyncio.sleep(wait)
+            continue
+        if attempt < attempts:
+            await asyncio.sleep(3 * attempt)
+            continue
+        break
+    return False, last_err
+
+
 async def process_download(job_id: str, url: str, language: str) -> None:
     try:
         youtube_id = extract_youtube_id(url)
@@ -475,12 +596,22 @@ async def process_download(job_id: str, url: str, language: str) -> None:
         update_job(job_id, status="error", stage="parse", message=str(exc), error=str(exc))
         return
 
+    js_name, _ = detect_js_runtime()
+    if not js_name and not should_use_docker():
+        update_job(
+            job_id,
+            youtube_id=youtube_id,
+            status="running",
+            stage="download",
+            message="Warning: no Node/Deno found — YouTube may fail. Install Node.js…",
+        )
+
     update_job(
         job_id,
         youtube_id=youtube_id,
         status="running",
         stage="download",
-        message="Downloading video and subtitles…",
+        message="Downloading video…",
     )
 
     out_dir = video_dir(youtube_id)
@@ -489,35 +620,16 @@ async def process_download(job_id: str, url: str, language: str) -> None:
         if leftover.name.endswith((".part", ".ytdl", ".temp")):
             leftover.unlink(missing_ok=True)
 
-    # Inside the downloader container the workdir is /out (volume-mounted).
-    out_tmpl = f"/out/{youtube_id}.%(ext)s" if should_use_docker() else f"{youtube_id}.%(ext)s"
-    ytdlp_args = [
-        "--no-playlist",
-        "--write-info-json",
-        "--write-thumbnail",
-        "--convert-thumbnails",
-        "jpg",
-        "--write-subs",
-        "--write-auto-subs",
-        "--sub-langs",
-        f"{language}.*,en.*,en",
-        "--sub-format",
-        "vtt/best",
-        "--embed-metadata",
-        "-f",
-        "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-        "--merge-output-format",
-        "mp4",
-        "-o",
-        out_tmpl,
-        f"https://www.youtube.com/watch?v={youtube_id}",
-    ]
-
-    cmd = yt_dlp_cmd(ytdlp_args, out_dir)
-    result = await asyncio.to_thread(run_cmd, cmd, out_dir if not should_use_docker() else None)
-
+    result = await download_video_media(youtube_id, out_dir)
     if result.returncode != 0:
-        err = (result.stderr or result.stdout or "yt-dlp failed")[-1200:]
+        err = cmd_output(result)[-1200:] or "yt-dlp failed"
+        # Soften common guidance in the UI error
+        if "javascript runtime" in err.lower() or "js runtime" in err.lower():
+            err = (
+                "yt-dlp needs a JavaScript runtime (Node.js or Deno).\n"
+                "Install Node: brew install node\n"
+                "Then restart the app and retry.\n\n" + err
+            )
         update_job(job_id, status="error", stage="download", message="Download failed", error=err)
         return
 
@@ -528,7 +640,10 @@ async def process_download(job_id: str, url: str, language: str) -> None:
         update_job(job_id, status="error", stage="convert", message="Conversion failed", error=str(exc))
         return
 
-    update_job(job_id, stage="subs", message="Extracting and indexing subtitles…")
+    update_job(job_id, stage="subs", message="Downloading subtitles…")
+    subs_ok, subs_msg = await download_subtitles(youtube_id, out_dir, language)
+
+    update_job(job_id, stage="subs", message="Indexing subtitles…")
 
     title = youtube_id
     duration: float | None = None
@@ -556,14 +671,9 @@ async def process_download(job_id: str, url: str, language: str) -> None:
             else:
                 cues = parse_vtt(sub_file)
         except Exception as exc:  # noqa: BLE001
-            update_job(
-                job_id,
-                status="error",
-                stage="subs",
-                message="Subtitle parse failed",
-                error=str(exc),
-            )
-            return
+            # Video is already saved — keep it and report missing/broken subs.
+            subs_msg = f"Subtitle parse failed: {exc}"
+            cues = []
 
     if cues:
         write_cues_json(out_dir, youtube_id, cues)
@@ -620,14 +730,23 @@ async def process_download(job_id: str, url: str, language: str) -> None:
                 (video_id, cue["start"], cue["end"], cue["text"]),
             )
 
-    msg = "Ready" if cues else "Ready (no subtitles found)"
+    if cues:
+        msg = "Ready"
+        err_field = None
+    elif subs_ok:
+        msg = "Ready (no subtitles found)"
+        err_field = None
+    else:
+        msg = "Ready (video saved; subtitles unavailable — retry later)"
+        err_field = subs_msg[-800:] if subs_msg else None
+
     update_job(
         job_id,
         status="done",
         stage="done",
         message=msg,
         video_id=video_id,
-        error=None,
+        error=err_field,
     )
 
 
@@ -653,6 +772,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    js_name, js_path = detect_js_runtime()
     return {
         "ok": True,
         "docker": docker_available(),
@@ -661,6 +781,8 @@ def health() -> dict[str, Any]:
         "data_dir": str(DATA_DIR),
         "yt_dlp": shutil.which("yt-dlp") is not None,
         "ffmpeg": shutil.which("ffmpeg") is not None,
+        "js_runtime": js_name,
+        "js_runtime_path": js_path,
     }
 
 

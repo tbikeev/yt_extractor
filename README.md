@@ -58,9 +58,12 @@ Needs **Python 3.8+** (3.11/3.12 recommended), `ffmpeg`, and `yt-dlp`:
 On macOS with Homebrew:
 
 ```bash
-brew install python ffmpeg yt-dlp
+brew install python ffmpeg yt-dlp node
 PYTHON=python3.12 ./scripts/dev.sh   # if `python3` is still an old system build
 ```
+
+**Note:** current yt-dlp needs a JS runtime (`node` or `deno`) for YouTube.  
+Subtitles are fetched in a separate step with retries — a YouTube 429 on captions will still keep the MP4.
 
 ## Usage
 

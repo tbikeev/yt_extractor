@@ -32,7 +32,15 @@ fi
 
 if ! command -v yt-dlp >/dev/null 2>&1; then
   echo "Installing yt-dlp locally…"
-  "$PYTHON" -m pip install -q yt-dlp
+  "$PYTHON" -m pip install -q -U yt-dlp
+else
+  # Keep extractor fixes current (YouTube changes often).
+  "$PYTHON" -m pip install -q -U yt-dlp >/dev/null 2>&1 || true
+fi
+
+if ! command -v node >/dev/null 2>&1 && ! command -v deno >/dev/null 2>&1; then
+  echo "WARNING: No JavaScript runtime found (node/deno)."
+  echo "  Modern YouTube downloads need one. On macOS: brew install node"
 fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
