@@ -9,6 +9,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -216,27 +217,77 @@ def should_use_docker() -> bool:
     return docker_available()
 
 
+def _candidate_bins(name: str) -> list[Path]:
+    """PATH lookup plus common macOS Homebrew / nvm locations."""
+    found: list[Path] = []
+    which = shutil.which(name)
+    if which:
+        found.append(Path(which))
+    extras = [
+        Path(f"/opt/homebrew/bin/{name}"),
+        Path(f"/usr/local/bin/{name}"),
+        Path.home() / f".local/bin/{name}",
+    ]
+    # nvm default alias (best-effort)
+    nvm = Path.home() / ".nvm/versions/node"
+    if nvm.is_dir():
+        versions = sorted(nvm.iterdir(), reverse=True)
+        for ver in versions[:5]:
+            extras.append(ver / "bin" / name)
+    for path in extras:
+        if path.is_file() and os.access(path, os.X_OK):
+            found.append(path)
+    # de-dupe preserving order
+    uniq: list[Path] = []
+    seen: set[str] = set()
+    for p in found:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq
+
+
 def detect_js_runtime() -> tuple[str | None, str | None]:
     """Return (runtime_name, path) for yt-dlp --js-runtimes. Prefer node, then deno."""
-    node = shutil.which("node")
-    if node:
-        return "node", node
-    deno = shutil.which("deno")
-    if deno:
-        return "deno", deno
+    env_node = os.environ.get("NODE_BINARY") or os.environ.get("YT_EXTRACTOR_NODE")
+    if env_node and Path(env_node).is_file():
+        return "node", env_node
+    env_deno = os.environ.get("DENO_BINARY") or os.environ.get("YT_EXTRACTOR_DENO")
+    if env_deno and Path(env_deno).is_file():
+        return "deno", env_deno
+
+    nodes = _candidate_bins("node")
+    if nodes:
+        return "node", str(nodes[0])
+    denos = _candidate_bins("deno")
+    if denos:
+        return "deno", str(denos[0])
     return None, None
 
 
 def js_runtime_args() -> list[str]:
     name, path = detect_js_runtime()
-    if not name:
+    if not name or not path:
         return []
-    # Explicit path helps when PATH differs inside docker vs host.
-    return ["--js-runtimes", f"{name}:{path}" if path else name]
+    # Explicit path helps when GUI/launchd PATH lacks Homebrew.
+    return ["--js-runtimes", f"{name}:{path}"]
+
+
+def missing_js_runtime_message() -> str:
+    return (
+        "yt-dlp needs Node.js (or Deno) to download YouTube videos.\n\n"
+        "On macOS:\n"
+        "  brew install node\n"
+        "Then stop the app (Ctrl+C), run ./scripts/dev.sh again, and retry.\n\n"
+        "Verify with: curl -s http://127.0.0.1:8080/api/health | grep js_runtime\n"
+        "It should show \"js_runtime\":\"node\"."
+    )
 
 
 def common_ytdlp_flags() -> list[str]:
     """Shared robustness flags for YouTube (JS runtime, retries, rate limits)."""
+    runtime = js_runtime_args()
     flags = [
         "--no-playlist",
         "--retries",
@@ -251,15 +302,20 @@ def common_ytdlp_flags() -> list[str]:
         "1",
         "--socket-timeout",
         "30",
-        *js_runtime_args(),
+        *runtime,
     ]
     return flags
 
 
 def yt_dlp_cmd(args: list[str], workdir: Path) -> list[str]:
     """Build either a dockerized or local yt-dlp command."""
+    # Prefer invoking yt-dlp via the same Python that runs the app, so upgrades
+    # from `pip install -U yt-dlp` are used even if an old brew binary is first on PATH.
+    ytdlp_bin = shutil.which("yt-dlp")
+    py_module = [sys.executable, "-m", "yt_dlp"]
+    base: list[str]
     if should_use_docker():
-        return [
+        base = [
             "docker",
             "run",
             "--rm",
@@ -268,9 +324,18 @@ def yt_dlp_cmd(args: list[str], workdir: Path) -> list[str]:
             "-w",
             "/out",
             DOWNLOADER_IMAGE,
-            *args,
         ]
-    return ["yt-dlp", *args]
+    else:
+        # python -m yt_dlp is more reliable across venvs / brew mixes
+        try:
+            import yt_dlp  # noqa: F401
+
+            base = py_module
+        except ImportError:
+            if not ytdlp_bin:
+                raise RuntimeError("yt-dlp is not installed")
+            base = [ytdlp_bin]
+    return [*base, *args]
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None, timeout: int = 3600) -> subprocess.CompletedProcess[str]:
@@ -596,22 +661,24 @@ async def process_download(job_id: str, url: str, language: str) -> None:
         update_job(job_id, status="error", stage="parse", message=str(exc), error=str(exc))
         return
 
-    js_name, _ = detect_js_runtime()
+    js_name, js_path = detect_js_runtime()
     if not js_name and not should_use_docker():
         update_job(
             job_id,
             youtube_id=youtube_id,
-            status="running",
+            status="error",
             stage="download",
-            message="Warning: no Node/Deno found — YouTube may fail. Install Node.js…",
+            message="Node.js required",
+            error=missing_js_runtime_message(),
         )
+        return
 
     update_job(
         job_id,
         youtube_id=youtube_id,
         status="running",
         stage="download",
-        message="Downloading video…",
+        message=f"Downloading video… (JS: {js_name or 'docker'})",
     )
 
     out_dir = video_dir(youtube_id)
@@ -837,8 +904,19 @@ async def start_download(body: DownloadRequest) -> JobOut:
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    if should_use_docker():
-        # Verify image exists (best-effort)
+    if not should_use_docker():
+        js_name, _ = detect_js_runtime()
+        if not js_name:
+            raise HTTPException(503, missing_js_runtime_message())
+        if not shutil.which("yt-dlp"):
+            try:
+                import yt_dlp  # noqa: F401
+            except ImportError as exc:
+                raise HTTPException(
+                    503,
+                    "yt-dlp not found. Install with: python3 -m pip install -U yt-dlp",
+                ) from exc
+    else:
         check = await asyncio.to_thread(
             run_cmd, ["docker", "image", "inspect", DOWNLOADER_IMAGE], timeout=30
         )
@@ -848,11 +926,6 @@ async def start_download(body: DownloadRequest) -> JobOut:
                 f"Docker downloader image '{DOWNLOADER_IMAGE}' not found. "
                 "Run: docker compose build downloader",
             )
-    elif not shutil.which("yt-dlp"):
-        raise HTTPException(
-            503,
-            "yt-dlp not found and Docker unavailable. Install yt-dlp or build the downloader image.",
-        )
 
     job_id = str(uuid.uuid4())
     ts = now_iso()
