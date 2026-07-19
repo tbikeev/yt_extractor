@@ -113,17 +113,24 @@ async function refreshJobsAndLibrary() {
     const [videos, jobs] = await Promise.all([api("/api/videos"), api("/api/jobs?limit=8")]);
     const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
     const recentErrors = jobs.filter((j) => j.status === "error").slice(0, 3);
+    const softWarnings = jobs
+      .filter((j) => j.status === "done" && j.error)
+      .slice(0, 2);
 
-    if (active.length || recentErrors.length) {
+    if (active.length || recentErrors.length || softWarnings.length) {
       jobList.hidden = false;
       jobList.replaceChildren(
-        ...[...active, ...recentErrors].map((job) => {
+        ...[...active, ...recentErrors, ...softWarnings].map((job) => {
           const el = document.createElement("div");
-          el.className = `job${job.status === "error" ? " error" : ""}`;
-          el.textContent =
-            job.status === "error"
-              ? `Failed (${job.youtube_id || "video"}): ${job.error || job.message}`
-              : `${job.stage}: ${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
+          const isError = job.status === "error";
+          el.className = `job${isError ? " error" : ""}`;
+          if (job.status === "done" && job.error) {
+            el.textContent = `${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
+          } else if (isError) {
+            el.textContent = `Failed (${job.youtube_id || "video"}): ${job.error || job.message}`;
+          } else {
+            el.textContent = `${job.stage}: ${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
+          }
           return el;
         })
       );

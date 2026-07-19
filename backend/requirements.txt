@@ -1,5 +1,9 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
-aiofiles==24.1.0
-python-multipart==0.0.20
+# Compatible with Python 3.8–3.12 (macOS system Python often lags).
+# Avoid pinning uvicorn>=0.34 which requires newer interpreters.
+fastapi>=0.110.0,<0.116
+uvicorn[standard]>=0.27.0,<0.34
+pydantic>=2.5.0,<2.11
+aiofiles>=23.1.0,<25
+python-multipart>=0.0.9
+yt-dlp>=2025.1.1
+curl_cffi>=0.7.0
