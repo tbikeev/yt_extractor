@@ -49,13 +49,18 @@ Or open Docker Desktop and sign in, then retry.
 
 ## Dev mode (no Docker)
 
-Needs Python 3.11+, `ffmpeg`, and `yt-dlp`:
+Needs **Python 3.8+** (3.11/3.12 recommended), `ffmpeg`, and `yt-dlp`:
 
 ```bash
 ./scripts/dev.sh
 ```
 
-On macOS with Homebrew: `brew install ffmpeg yt-dlp` (Python 3 is usually already present).
+On macOS with Homebrew:
+
+```bash
+brew install python ffmpeg yt-dlp
+PYTHON=python3.12 ./scripts/dev.sh   # if `python3` is still an old system build
+```
 
 ## Usage
 
