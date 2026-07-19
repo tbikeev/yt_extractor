@@ -168,6 +168,24 @@ async function renderHome() {
     renderUrlHistoryUI();
   });
 
+  // Seed history from prior download jobs (server) once, then keep browser-local.
+  api("/api/jobs?limit=50")
+    .then((jobs) => {
+      const existing = new Set(loadUrlHistory());
+      let changed = false;
+      for (const job of jobs) {
+        if (job.url && !existing.has(job.url)) {
+          existing.add(job.url);
+          changed = true;
+        }
+      }
+      if (changed) {
+        saveUrlHistory([...existing].slice(0, URL_HISTORY_MAX));
+        renderUrlHistoryUI();
+      }
+    })
+    .catch(() => {});
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     status.hidden = false;
