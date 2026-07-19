@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Build the Docker yt-dlp downloader image and start the web app.
-# If Docker Hub auth/keychain fails on macOS, falls back to scripts/dev.sh
-# unless FORCE_DOCKER=1.
+# Start the web app. Downloads use jauderho/yt-dlp via Docker (same as ytdl-docker).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-FORCE_DOCKER="${FORCE_DOCKER:-0}"
+FORCE_DOCKER_WEB="${FORCE_DOCKER_WEB:-0}"
 FALLBACK_LOCAL="${FALLBACK_LOCAL:-1}"
+export DOWNLOADER_IMAGE="${DOWNLOADER_IMAGE:-jauderho/yt-dlp}"
 
 print_keychain_help() {
   cat <<'EOF'
@@ -22,13 +21,8 @@ Fix (pick one), then re-run ./scripts/start.sh:
 
   2) Or open Docker Desktop, ensure you're signed in, then retry.
 
-  3) Or temporarily bypass the credential helper:
-       # backup first
-       cp ~/.docker/config.json ~/.docker/config.json.bak
-       # remove the "credsStore" / "credStore" line(s), save, retry
-       # restore later: mv ~/.docker/config.json.bak ~/.docker/config.json
-
-Or skip Docker and run locally (needs Python 3, ffmpeg, yt-dlp):
+Or skip building the web image and run the API on the host (still uses
+jauderho/yt-dlp for downloads when Docker works):
        ./scripts/dev.sh
 
 EOF
@@ -41,7 +35,6 @@ is_cred_error() {
 
 lan_ip() {
   if command -v ipconfig >/dev/null 2>&1; then
-    # macOS
     ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true
   else
     hostname -I 2>/dev/null | awk '{print $1}' || true
@@ -50,39 +43,42 @@ lan_ip() {
 
 start_local_fallback() {
   echo ""
-  echo "==> Falling back to local mode (no Docker image pull)…"
+  echo "==> Falling back to local web app (downloads still use ${DOWNLOADER_IMAGE} when Docker is up)…"
   exec "$ROOT/scripts/dev.sh"
 }
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is not installed or not on PATH."
-  if [[ "$FALLBACK_LOCAL" == "1" && "$FORCE_DOCKER" != "1" ]]; then
+  if [[ "$FALLBACK_LOCAL" == "1" && "$FORCE_DOCKER_WEB" != "1" ]]; then
     start_local_fallback
   fi
   exit 1
 fi
 
-echo "==> Building downloader image (yt-extractor-downloader)"
-BUILD_LOG="$(mktemp)"
-if ! docker build -t yt-extractor-downloader -f downloader/Dockerfile . 2>&1 | tee "$BUILD_LOG"; then
-  if is_cred_error "$(cat "$BUILD_LOG")"; then
+echo "==> Ensuring downloader image (${DOWNLOADER_IMAGE})"
+PULL_LOG="$(mktemp)"
+if ! docker pull "$DOWNLOADER_IMAGE" 2>&1 | tee "$PULL_LOG"; then
+  if is_cred_error "$(cat "$PULL_LOG")"; then
     print_keychain_help
-    if [[ "$FALLBACK_LOCAL" == "1" && "$FORCE_DOCKER" != "1" ]]; then
-      rm -f "$BUILD_LOG"
+  fi
+  # Image may already exist locally (e.g. from ytdl-docker)
+  if ! docker image inspect "$DOWNLOADER_IMAGE" >/dev/null 2>&1; then
+    rm -f "$PULL_LOG"
+    if [[ "$FALLBACK_LOCAL" == "1" && "$FORCE_DOCKER_WEB" != "1" ]]; then
       start_local_fallback
     fi
+    exit 1
   fi
-  rm -f "$BUILD_LOG"
-  exit 1
+  echo "Using existing local image ${DOWNLOADER_IMAGE}"
 fi
-rm -f "$BUILD_LOG"
+rm -f "$PULL_LOG"
 
 echo "==> Building & starting web app on :8080"
 COMPOSE_LOG="$(mktemp)"
 if ! docker compose up -d --build web 2>&1 | tee "$COMPOSE_LOG"; then
   if is_cred_error "$(cat "$COMPOSE_LOG")"; then
     print_keychain_help
-    if [[ "$FALLBACK_LOCAL" == "1" && "$FORCE_DOCKER" != "1" ]]; then
+    if [[ "$FALLBACK_LOCAL" == "1" && "$FORCE_DOCKER_WEB" != "1" ]]; then
       rm -f "$COMPOSE_LOG"
       start_local_fallback
     fi
@@ -99,6 +95,7 @@ echo "  Local:   http://127.0.0.1:8080"
 if [[ -n "${LAN_IP}" ]]; then
   echo "  Network: http://${LAN_IP}:8080"
 fi
+echo "  Downloader image: ${DOWNLOADER_IMAGE}"
 echo ""
 echo "Open that URL on your iPhone or laptop (same Wi‑Fi)."
 echo "Videos and the library DB are stored in: ${ROOT}/data"
