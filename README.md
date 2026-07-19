@@ -85,13 +85,18 @@ USE_DOCKER=never ./scripts/dev.sh
 
 ```
 yt_extractor/
-├── backend/app/main.py      # FastAPI app
+├── backend/app/main.py      # FastAPI app (spawns jauderho/yt-dlp)
 ├── frontend/                # Mobile-friendly UI
-├── downloader/Dockerfile    # yt-dlp + ffmpeg image
 ├── docker-compose.yml
-├── scripts/start.sh         # Docker start
-├── scripts/dev.sh           # Local start
+├── scripts/start.sh         # Docker web + jauderho/yt-dlp
+├── scripts/dev.sh           # Local web; Docker downloads when available
 └── data/                    # Local media + DB (gitignored)
+```
+
+Override the downloader image if needed:
+
+```bash
+DOWNLOADER_IMAGE=jauderho/yt-dlp USE_DOCKER=auto ./scripts/dev.sh
 ```
 
 ## Notes
