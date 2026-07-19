@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Data & media (keep directory structure)
+data/videos/*
+!data/videos/.gitkeep
+data/thumbs/*
+!data/thumbs/.gitkeep
+data/*.db
+data/*.db-*
+data/jobs/*
+
+# Node / frontend build artifacts
+node_modules/
+dist/
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

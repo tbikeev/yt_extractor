@@ -1,1 +1,83 @@
-# yt_extractor
+# YT Extractor
+
+Local web app that downloads YouTube videos, converts them to MP4, extracts timestamped subtitles, and lets you watch + full-text search them from an iPhone or laptop on your network.
+
+Project path on your machine: `~/Projects/yt_extractor`  
+GitHub: https://github.com/tbikeev/yt_extractor
+
+## What it does
+
+1. **Download** — YouTube video via a Docker `yt-dlp` downloader (or local `yt-dlp`)
+2. **Convert** — remux/encode to **MP4** with `ffmpeg`
+3. **Subtitles** — pull original (or auto) captions, store as VTT + searchable cues
+4. **Watch offline** — HTML5 player with clickable timestamped transcript
+5. **Search** — SQLite FTS5 across all library transcripts; jump straight to the hit
+
+## Quick start (Docker — recommended)
+
+Requires Docker Desktop (or Docker Engine) and `docker compose`.
+
+```bash
+cd ~/Projects/yt_extractor   # or clone into that path
+chmod +x scripts/*.sh
+./scripts/start.sh
+```
+
+Then open:
+
+- This machine: http://127.0.0.1:8080  
+- Phone / other devices (same Wi‑Fi): `http://<your-lan-ip>:8080`
+
+The start script builds:
+
+- `yt-extractor-downloader` — yt-dlp + ffmpeg image used for downloads  
+- `yt-extractor-web` — FastAPI app + UI, port **8080**
+
+Data (videos, thumbs, SQLite DB) lives in `./data/` on the host.
+
+## Dev mode (no Docker)
+
+Needs Python 3.11+, `ffmpeg`, and `yt-dlp`:
+
+```bash
+./scripts/dev.sh
+```
+
+## Usage
+
+1. Paste a YouTube URL on the home screen → **Download**
+2. Wait for the job to finish (status updates live)
+3. Open **Watch** — tap any transcript line to seek
+4. Use **Search** to find phrases across all downloaded videos
+
+## API (brief)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/health` | Health + docker/yt-dlp status |
+| GET | `/api/videos` | Library |
+| POST | `/api/download` | `{ "url": "...", "language": "en" }` |
+| GET | `/api/jobs/{id}` | Job status |
+| GET | `/api/videos/{id}/cues` | Timestamped cues |
+| GET | `/api/search?q=` | Full-text subtitle search |
+| GET | `/media/videos/{youtube_id}/{file}.mp4` | Video file |
+
+## Layout
+
+```
+yt_extractor/
+├── backend/app/main.py      # FastAPI app
+├── frontend/                # Mobile-friendly UI
+├── downloader/Dockerfile    # yt-dlp + ffmpeg image
+├── docker-compose.yml
+├── scripts/start.sh         # Docker start
+├── scripts/dev.sh           # Local start
+└── data/                    # Local media + DB (gitignored)
+```
+
+## Notes
+
+- Prefer official / uploaded captions when available; falls back to auto-captions.
+- Re-downloading the same YouTube id updates the existing library entry.
+- Bind address is `0.0.0.0` so devices on your LAN can reach the app.
+- For personal offline use of content you are allowed to download.
