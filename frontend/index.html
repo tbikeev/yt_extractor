@@ -37,8 +37,16 @@
         <p class="lede">Downloads locally, converts to MP4, and indexes original subtitles so you can search and jump by timestamp — on iPhone or desktop.</p>
         <form class="download-form" id="download-form">
           <label class="sr-only" for="url">YouTube URL</label>
-          <input id="url" name="url" type="url" inputmode="url" autocomplete="off"
-                 placeholder="Paste a YouTube link…" required />
+          <input id="url" name="url" type="url" inputmode="url" list="url-history"
+                 autocomplete="url" placeholder="Paste a YouTube link…" required />
+          <datalist id="url-history"></datalist>
+          <div class="url-history" id="url-history-panel" hidden>
+            <div class="url-history-head">
+              <span>Recent links</span>
+              <button type="button" class="linkish" id="clear-url-history">Clear</button>
+            </div>
+            <ul id="url-history-list" class="url-history-list"></ul>
+          </div>
           <div class="form-row">
             <label class="lang">
               Subs

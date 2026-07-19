@@ -3,8 +3,89 @@ const tplHome = document.getElementById("tpl-home");
 const tplWatch = document.getElementById("tpl-watch");
 const tplSearch = document.getElementById("tpl-search");
 
+const URL_HISTORY_KEY = "yt_extractor.url_history";
+const LANG_PREF_KEY = "yt_extractor.language";
+const URL_HISTORY_MAX = 20;
+
 let pollTimer = null;
 let activeCueObserver = null;
+
+function loadUrlHistory() {
+  try {
+    const raw = localStorage.getItem(URL_HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((u) => typeof u === "string" && u.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveUrlHistory(urls) {
+  localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(urls.slice(0, URL_HISTORY_MAX)));
+}
+
+function rememberUrl(url) {
+  const cleaned = url.trim();
+  if (!cleaned) return;
+  const next = [cleaned, ...loadUrlHistory().filter((u) => u !== cleaned)];
+  saveUrlHistory(next);
+}
+
+function clearUrlHistory() {
+  localStorage.removeItem(URL_HISTORY_KEY);
+}
+
+function renderUrlHistoryUI() {
+  const datalist = $("#url-history");
+  const panel = $("#url-history-panel");
+  const list = $("#url-history-list");
+  const input = $("#url");
+  if (!datalist || !panel || !list || !input) return;
+
+  const urls = loadUrlHistory();
+  datalist.replaceChildren(
+    ...urls.map((url) => {
+      const opt = document.createElement("option");
+      opt.value = url;
+      return opt;
+    })
+  );
+
+  if (!urls.length) {
+    panel.hidden = true;
+    list.replaceChildren();
+    return;
+  }
+
+  panel.hidden = false;
+  list.replaceChildren(
+    ...urls.slice(0, 8).map((url) => {
+      const li = document.createElement("li");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "url-history-item";
+      btn.title = url;
+      btn.textContent = shortenUrl(url);
+      btn.addEventListener("click", () => {
+        input.value = url;
+        input.focus();
+      });
+      li.appendChild(btn);
+      return li;
+    })
+  );
+}
+
+function shortenUrl(url) {
+  try {
+    const u = new URL(url);
+    const id = u.searchParams.get("v") || u.pathname.replace(/^\//, "");
+    if (id && id.length <= 20) return `${u.hostname.replace("www.", "")} · ${id}`;
+  } catch {
+    /* fall through */
+  }
+  return url.length > 48 ? `${url.slice(0, 45)}…` : url;
+}
 
 function $(sel, root = document) {
   return root.querySelector(sel);
@@ -74,6 +155,18 @@ async function renderHome() {
   const form = $("#download-form");
   const status = $("#form-status");
   const btn = $("#download-btn");
+  const lang = $("#language");
+  const savedLang = localStorage.getItem(LANG_PREF_KEY);
+  if (savedLang && [...lang.options].some((o) => o.value === savedLang)) {
+    lang.value = savedLang;
+  }
+  lang.addEventListener("change", () => localStorage.setItem(LANG_PREF_KEY, lang.value));
+
+  renderUrlHistoryUI();
+  $("#clear-url-history")?.addEventListener("click", () => {
+    clearUrlHistory();
+    renderUrlHistoryUI();
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -81,18 +174,25 @@ async function renderHome() {
     status.classList.remove("error");
     status.textContent = "Starting download…";
     btn.disabled = true;
+    const url = $("#url").value.trim();
     try {
       const job = await api("/api/download", {
         method: "POST",
         body: JSON.stringify({
-          url: $("#url").value.trim(),
-          language: $("#language").value,
+          url,
+          language: lang.value,
         }),
       });
+      rememberUrl(url);
+      localStorage.setItem(LANG_PREF_KEY, lang.value);
+      renderUrlHistoryUI();
       status.textContent = `Queued — ${job.message}`;
       $("#url").value = "";
       await refreshJobsAndLibrary();
     } catch (err) {
+      // Still remember the URL so a failed attempt is easy to retry.
+      rememberUrl(url);
+      renderUrlHistoryUI();
       status.classList.add("error");
       status.textContent = err.message;
     } finally {
