@@ -72,7 +72,13 @@
         <h2>Your library</h2>
         <p>Videos stored on this machine — playable on the local network.</p>
       </div>
-      <div id="job-list" class="job-list" hidden></div>
+      <div id="job-panel" class="job-panel" hidden>
+        <div class="job-panel-head">
+          <span>Activity</span>
+          <button type="button" class="linkish" id="clear-job-errors" hidden>Clear errors</button>
+        </div>
+        <div id="job-list" class="job-list"></div>
+      </div>
       <div id="library" class="library"></div>
     </section>
   </template>
@@ -87,6 +93,10 @@
           </div>
           <h1 id="watch-title" class="watch-title"></h1>
           <div class="watch-meta" id="watch-meta"></div>
+          <div class="watch-actions" id="watch-actions" hidden>
+            <a class="btn ghost" id="download-subs-vtt" href="#" download>Download VTT</a>
+            <a class="btn ghost" id="download-subs-json" href="#" download>Download JSON</a>
+          </div>
         </div>
         <aside class="transcript-pane">
           <div class="transcript-toolbar">

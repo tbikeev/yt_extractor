@@ -257,6 +257,20 @@ body.mode-watch .nav-link:hover {
   font-size: 0.9rem;
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
+  display: grid;
+  gap: 0.1rem;
+}
+
+.url-history-title {
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.25;
+}
+
+.url-history-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.3;
 }
 
 .url-history-item:hover {
@@ -447,6 +461,22 @@ body.mode-watch .nav-link:hover {
   margin-bottom: 1rem;
 }
 
+.job-panel {
+  margin-bottom: 1rem;
+}
+
+.job-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
 .job {
   padding: 0.75rem 0.9rem;
   border-radius: 12px;
@@ -509,6 +539,19 @@ body.mode-watch .nav-link:hover {
 .watch-meta {
   color: #8b97a6;
   font-size: 0.9rem;
+}
+
+.watch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.65rem;
+}
+
+.watch-actions .btn {
+  padding: 0.45rem 0.75rem;
+  font-size: 0.85rem;
+  text-decoration: none;
 }
 
 .transcript-pane {
