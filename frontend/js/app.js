@@ -9,6 +9,8 @@ const URL_HISTORY_MAX = 20;
 
 let pollTimer = null;
 let activeCueObserver = null;
+let lastLibraryKey = "";
+let lastJobsKey = "";
 
 function loadUrlHistory() {
   try {
@@ -211,6 +213,8 @@ function route() {
   const parts = path.split("/").filter(Boolean);
   clearInterval(pollTimer);
   pollTimer = null;
+  lastLibraryKey = "";
+  lastJobsKey = "";
   if (activeCueObserver) {
     cancelAnimationFrame(activeCueObserver);
     activeCueObserver = null;
@@ -313,92 +317,140 @@ async function renderHome() {
   });
 
   await refreshJobsAndLibrary();
-  pollTimer = setInterval(refreshJobsAndLibrary, 2500);
+  scheduleJobPolling();
+}
+
+function jobsSnapshot(jobs) {
+  return JSON.stringify(
+    jobs.map((j) => [j.id, j.status, j.stage, j.message, j.error, j.updated_at])
+  );
+}
+
+function librarySnapshot(videos) {
+  return JSON.stringify(
+    videos.map((v) => [v.id, v.title, v.has_subs, v.has_video, v.created_at, v.duration])
+  );
+}
+
+function scheduleJobPolling(jobs) {
+  clearInterval(pollTimer);
+  pollTimer = null;
+  if (!jobs) return;
+  const hasActive = jobs.some((j) => j.status === "queued" || j.status === "running");
+  if (hasActive) {
+    pollTimer = setInterval(refreshJobsAndLibrary, 2500);
+  }
+}
+
+function renderJobPanel(jobs) {
+  const jobPanel = $("#job-panel");
+  const jobList = $("#job-list");
+  const clearErrorsBtn = $("#clear-job-errors");
+  if (!jobPanel || !jobList) return;
+
+  const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
+  const recentErrors = jobs.filter((j) => j.status === "error");
+  const softWarnings = jobs.filter((j) => j.status === "done" && j.error);
+  const hasClearable = recentErrors.length + softWarnings.length > 0;
+
+  if (active.length || recentErrors.length || softWarnings.length) {
+    jobPanel.hidden = false;
+    if (clearErrorsBtn) clearErrorsBtn.hidden = !hasClearable;
+    jobList.replaceChildren(
+      ...[...active, ...recentErrors, ...softWarnings].map((job) => {
+        const el = document.createElement("div");
+        const isError = job.status === "error";
+        el.className = `job${isError ? " error" : ""}`;
+        const when = job.created_at ? fmtDate(job.created_at) : "";
+        if (job.status === "done" && job.error) {
+          el.textContent = `${when ? when + " — " : ""}${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
+        } else if (isError) {
+          el.textContent = `${when ? when + " — " : ""}Failed (${job.youtube_id || "video"}): ${job.error || job.message}`;
+        } else {
+          el.textContent = `${when ? when + " — " : ""}${job.stage}: ${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
+        }
+        return el;
+      })
+    );
+  } else {
+    jobPanel.hidden = true;
+    jobList.replaceChildren();
+    if (clearErrorsBtn) clearErrorsBtn.hidden = true;
+  }
+}
+
+function renderLibrary(videos, { animate = false } = {}) {
+  const libraryEl = $("#library");
+  if (!libraryEl) return;
+
+  if (!videos.length) {
+    libraryEl.innerHTML = `<p class="empty">No videos yet. Paste a YouTube link above to download your first one.</p>`;
+    return;
+  }
+
+  libraryEl.replaceChildren(
+    ...videos.map((v, i) => {
+      const row = document.createElement("article");
+      row.className = animate ? "video-row" : "video-row is-stable";
+      if (animate) row.style.animationDelay = `${Math.min(i, 8) * 40}ms`;
+
+      const thumb = v.thumbnail_url
+        ? `<img class="thumb" src="${v.thumbnail_url}" alt="" loading="lazy" />`
+        : `<div class="thumb placeholder">No thumb</div>`;
+
+      const subsBtns = v.has_subs
+        ? `<a class="btn ghost" href="${v.subs_vtt_url}" download="${escapeHtml(v.title)}.vtt">VTT</a>
+           <a class="btn ghost" href="${v.subs_json_url}" download="${escapeHtml(v.title)}.json">JSON</a>`
+        : "";
+
+      row.innerHTML = `
+        ${thumb}
+        <div class="video-info">
+          <h3>${escapeHtml(v.title)}</h3>
+          <p>${fmtDate(v.created_at)} · ${fmtTime(v.duration)} · ${v.has_subs ? "subs indexed" : "no subs"} · ${escapeHtml(v.youtube_id)}</p>
+        </div>
+        <div class="video-actions">
+          <a class="btn primary" href="#/watch/${v.id}" data-link>Watch</a>
+          ${subsBtns}
+          <button type="button" class="btn ghost" data-delete="${v.id}">Delete</button>
+        </div>
+      `;
+      row.querySelector("[data-delete]").addEventListener("click", async () => {
+        if (!confirm(`Delete “${v.title}”?`)) return;
+        await api(`/api/videos/${v.id}`, { method: "DELETE" });
+        lastLibraryKey = "";
+        await refreshJobsAndLibrary();
+      });
+      return row;
+    })
+  );
 }
 
 async function refreshJobsAndLibrary() {
   const libraryEl = $("#library");
-  const jobPanel = $("#job-panel");
-  const jobList = $("#job-list");
-  const clearErrorsBtn = $("#clear-job-errors");
   if (!libraryEl) return;
 
   try {
     const [videos, jobs] = await Promise.all([api("/api/videos"), api("/api/jobs?limit=20")]);
+
     if (enrichUrlHistoryFromVideos(videos)) renderUrlHistoryUI();
 
-    const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
-    const recentErrors = jobs.filter((j) => j.status === "error");
-    const softWarnings = jobs.filter((j) => j.status === "done" && j.error);
-    const hasClearable = recentErrors.length + softWarnings.length > 0;
-
-    if (active.length || recentErrors.length || softWarnings.length) {
-      jobPanel.hidden = false;
-      if (clearErrorsBtn) clearErrorsBtn.hidden = !hasClearable;
-      jobList.replaceChildren(
-        ...[...active, ...recentErrors, ...softWarnings].map((job) => {
-          const el = document.createElement("div");
-          const isError = job.status === "error";
-          el.className = `job${isError ? " error" : ""}`;
-          const when = job.created_at ? fmtDate(job.created_at) : "";
-          if (job.status === "done" && job.error) {
-            el.textContent = `${when ? when + " — " : ""}${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
-          } else if (isError) {
-            el.textContent = `${when ? when + " — " : ""}Failed (${job.youtube_id || "video"}): ${job.error || job.message}`;
-          } else {
-            el.textContent = `${when ? when + " — " : ""}${job.stage}: ${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
-          }
-          return el;
-        })
-      );
-    } else {
-      jobPanel.hidden = true;
-      jobList.replaceChildren();
-      if (clearErrorsBtn) clearErrorsBtn.hidden = true;
+    const jobsKey = jobsSnapshot(jobs);
+    if (jobsKey !== lastJobsKey) {
+      lastJobsKey = jobsKey;
+      renderJobPanel(jobs);
     }
+    scheduleJobPolling(jobs);
 
-    if (!videos.length) {
-      libraryEl.innerHTML = `<p class="empty">No videos yet. Paste a YouTube link above to download your first one.</p>`;
-      return;
+    const libKey = librarySnapshot(videos);
+    if (libKey !== lastLibraryKey) {
+      const firstPaint = !lastLibraryKey;
+      lastLibraryKey = libKey;
+      renderLibrary(videos, { animate: firstPaint });
     }
-
-    libraryEl.replaceChildren(
-      ...videos.map((v, i) => {
-        const row = document.createElement("article");
-        row.className = "video-row";
-        row.style.animationDelay = `${Math.min(i, 8) * 40}ms`;
-
-        const thumb = v.thumbnail_url
-          ? `<img class="thumb" src="${v.thumbnail_url}" alt="" loading="lazy" />`
-          : `<div class="thumb placeholder">No thumb</div>`;
-
-        const subsBtns = v.has_subs
-          ? `<a class="btn ghost" href="${v.subs_vtt_url}" download>VTT</a>
-             <a class="btn ghost" href="${v.subs_json_url}" download>JSON</a>`
-          : "";
-
-        row.innerHTML = `
-          ${thumb}
-          <div class="video-info">
-            <h3>${escapeHtml(v.title)}</h3>
-            <p>${fmtDate(v.created_at)} · ${fmtTime(v.duration)} · ${v.has_subs ? "subs indexed" : "no subs"} · ${escapeHtml(v.youtube_id)}</p>
-          </div>
-          <div class="video-actions">
-            <a class="btn primary" href="#/watch/${v.id}" data-link>Watch</a>
-            ${subsBtns}
-            <button type="button" class="btn ghost" data-delete="${v.id}">Delete</button>
-          </div>
-        `;
-        row.querySelector("[data-delete]").addEventListener("click", async () => {
-          if (!confirm(`Delete “${v.title}”?`)) return;
-          await api(`/api/videos/${v.id}`, { method: "DELETE" });
-          await refreshJobsAndLibrary();
-        });
-        return row;
-      })
-    );
   } catch (err) {
     libraryEl.innerHTML = `<p class="empty">Could not load library: ${escapeHtml(err.message)}</p>`;
+    lastLibraryKey = "";
   }
 }
 
@@ -431,8 +483,12 @@ async function renderWatch(videoId, params) {
   const watchActions = $("#watch-actions");
   if (video.has_subs && video.subs_vtt_url && video.subs_json_url) {
     watchActions.hidden = false;
-    $("#download-subs-vtt").href = video.subs_vtt_url;
-    $("#download-subs-json").href = video.subs_json_url;
+    const vtt = $("#download-subs-vtt");
+    const json = $("#download-subs-json");
+    vtt.href = video.subs_vtt_url;
+    json.href = video.subs_json_url;
+    vtt.setAttribute("download", `${video.title}.vtt`);
+    json.setAttribute("download", `${video.title}.json`);
   } else if (watchActions) {
     watchActions.hidden = true;
   }
