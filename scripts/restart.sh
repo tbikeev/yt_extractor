@@ -44,7 +44,12 @@ start_background() {
 
   if curl -sf "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
     echo "OK — http://127.0.0.1:${PORT}"
-    curl -s "http://127.0.0.1:${PORT}/api/health" | python3 -m json.tool 2>/dev/null || true
+    PY="$ROOT/.venv/bin/python"
+    if [[ -x "$PY" ]]; then
+      curl -s "http://127.0.0.1:${PORT}/api/health" | "$PY" -m json.tool 2>/dev/null || true
+    else
+      curl -s "http://127.0.0.1:${PORT}/api/health"
+    fi
   else
     echo "Server not responding yet. Check log:"
     echo "  tail -f ${LOG}"

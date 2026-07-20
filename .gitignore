@@ -14,6 +14,8 @@ data/thumbs/*
 data/*.db
 data/*.db-*
 data/jobs/*
+data/yt-extractor.log
+data/yt-extractor.pid
 
 # Node / frontend build artifacts
 node_modules/
