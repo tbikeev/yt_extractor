@@ -403,6 +403,10 @@ body.mode-watch .nav-link:hover {
   animation: rise 0.4s ease both;
 }
 
+.video-row.is-stable {
+  animation: none;
+}
+
 .video-row:hover {
   transform: translateY(-1px);
   border-color: rgba(13, 115, 119, 0.35);

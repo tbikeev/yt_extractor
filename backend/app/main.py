@@ -14,7 +14,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -566,6 +566,22 @@ def write_vtt(directory: Path, youtube_id: str, cues: list[dict[str, Any]]) -> P
     return path
 
 
+def video_download_basename(title: str, youtube_id: str) -> str:
+    """Human-readable basename for downloads (matches the video title)."""
+    base = re.sub(r"\s+", " ", (title or youtube_id).strip())
+    return (base[:120] or youtube_id)
+
+
+def attachment_content_disposition(filename: str) -> str:
+    """RFC 5987-safe Content-Disposition for non-ASCII filenames."""
+    try:
+        filename.encode("latin-1")
+        return f'attachment; filename="{filename}"'
+    except UnicodeEncodeError:
+        ascii_fallback = re.sub(r"[^\x20-\x7E]", "", filename).strip() or "download"
+        return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
+
+
 def row_to_video(row: sqlite3.Row) -> VideoOut:
     youtube_id = row["youtube_id"]
     has_video = bool(row["has_video"])
@@ -1033,14 +1049,8 @@ def download_subs_vtt(video_id: str):
     path = VIDEOS_DIR / youtube_id / f"{youtube_id}.vtt"
     if not path.exists():
         raise HTTPException(404, "Subtitle file not found")
-    safe_title = re.sub(r"[^\w\s-]", "", row["title"])[:60].strip() or youtube_id
-    filename = f"{safe_title}.vtt"
-    return FileResponse(
-        path,
-        media_type="text/vtt",
-        filename=filename,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    filename = f"{video_download_basename(row['title'], youtube_id)}.vtt"
+    return FileResponse(path, media_type="text/vtt", filename=filename)
 
 
 @app.get("/api/videos/{video_id}/subs/json")
@@ -1058,27 +1068,21 @@ def download_subs_json(video_id: str):
             (video_id,),
         ).fetchall()
     youtube_id = row["youtube_id"]
+    basename = video_download_basename(row["title"], youtube_id)
     path = VIDEOS_DIR / youtube_id / f"{youtube_id}.cues.json"
     if path.exists():
-        safe_title = re.sub(r"[^\w\s-]", "", row["title"])[:60].strip() or youtube_id
-        filename = f"{safe_title}.cues.json"
-        return FileResponse(
-            path,
-            media_type="application/json",
-            filename=filename,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        filename = f"{basename}.json"
+        return FileResponse(path, media_type="application/json", filename=filename)
     # Fallback: build from DB
     payload = [{"start": r["start"], "end": r["end"], "text": r["text"]} for r in cues]
     if not payload:
         raise HTTPException(404, "No subtitle cues found")
-    safe_title = re.sub(r"[^\w\s-]", "", row["title"])[:60].strip() or youtube_id
-    filename = f"{safe_title}.cues.json"
+    filename = f"{basename}.json"
     body = json.dumps(payload, ensure_ascii=False, indent=2)
     return Response(
         content=body,
         media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": attachment_content_disposition(filename)},
     )
 
 
