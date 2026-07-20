@@ -14,21 +14,74 @@ function loadUrlHistory() {
   try {
     const raw = localStorage.getItem(URL_HISTORY_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((u) => typeof u === "string" && u.trim()) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(normalizeHistoryEntry).filter(Boolean);
   } catch {
     return [];
   }
 }
 
-function saveUrlHistory(urls) {
-  localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(urls.slice(0, URL_HISTORY_MAX)));
+function normalizeHistoryEntry(entry) {
+  if (typeof entry === "string") {
+    const url = entry.trim();
+    return url ? { url, title: null, youtube_id: null, added_at: null } : null;
+  }
+  if (entry && typeof entry.url === "string" && entry.url.trim()) {
+    return {
+      url: entry.url.trim(),
+      title: entry.title || null,
+      youtube_id: entry.youtube_id || null,
+      added_at: entry.added_at || null,
+    };
+  }
+  return null;
 }
 
-function rememberUrl(url) {
+function saveUrlHistory(entries) {
+  localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(entries.slice(0, URL_HISTORY_MAX)));
+}
+
+function rememberUrl(url, meta = {}) {
   const cleaned = url.trim();
   if (!cleaned) return;
-  const next = [cleaned, ...loadUrlHistory().filter((u) => u !== cleaned)];
+  const prev = loadUrlHistory().find((e) => e.url === cleaned);
+  const entry = {
+    url: cleaned,
+    title: meta.title || prev?.title || null,
+    youtube_id: meta.youtube_id || prev?.youtube_id || null,
+    added_at: meta.added_at || prev?.added_at || new Date().toISOString(),
+  };
+  const next = [entry, ...loadUrlHistory().filter((e) => e.url !== cleaned)];
   saveUrlHistory(next);
+}
+
+function enrichUrlHistoryFromVideos(videos) {
+  const byId = new Map(videos.map((v) => [v.youtube_id, v]));
+  let changed = false;
+  const next = loadUrlHistory().map((entry) => {
+    const yt = entry.youtube_id || youtubeIdFromUrl(entry.url);
+    const video = yt ? byId.get(yt) : null;
+    if (!video) return entry;
+    const title = entry.title || video.title;
+    const youtube_id = entry.youtube_id || video.youtube_id;
+    if (title !== entry.title || youtube_id !== entry.youtube_id) {
+      changed = true;
+      return { ...entry, title, youtube_id };
+    }
+    return entry;
+  });
+  if (changed) saveUrlHistory(next);
+  return changed;
+}
+
+function youtubeIdFromUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname.includes("youtu.be")) return u.pathname.slice(1).split("/")[0] || null;
+    return u.searchParams.get("v");
+  } catch {
+    return null;
+  }
 }
 
 function clearUrlHistory() {
@@ -42,16 +95,17 @@ function renderUrlHistoryUI() {
   const input = $("#url");
   if (!datalist || !panel || !list || !input) return;
 
-  const urls = loadUrlHistory();
+  const entries = loadUrlHistory();
   datalist.replaceChildren(
-    ...urls.map((url) => {
+    ...entries.map((entry) => {
       const opt = document.createElement("option");
-      opt.value = url;
+      opt.value = entry.url;
+      opt.label = entry.title || shortenUrl(entry.url);
       return opt;
     })
   );
 
-  if (!urls.length) {
+  if (!entries.length) {
     panel.hidden = true;
     list.replaceChildren();
     return;
@@ -59,15 +113,22 @@ function renderUrlHistoryUI() {
 
   panel.hidden = false;
   list.replaceChildren(
-    ...urls.slice(0, 8).map((url) => {
+    ...entries.slice(0, 8).map((entry) => {
       const li = document.createElement("li");
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "url-history-item";
-      btn.title = url;
-      btn.textContent = shortenUrl(url);
+      btn.title = entry.url;
+      const title = entry.title || shortenUrl(entry.url);
+      const metaParts = [];
+      if (entry.added_at) metaParts.push(fmtDate(entry.added_at));
+      if (entry.youtube_id) metaParts.push(entry.youtube_id);
+      btn.innerHTML = `
+        <span class="url-history-title">${escapeHtml(title)}</span>
+        <span class="url-history-meta">${escapeHtml(metaParts.join(" · ") || entry.url)}</span>
+      `;
       btn.addEventListener("click", () => {
-        input.value = url;
+        input.value = entry.url;
         input.focus();
       });
       li.appendChild(btn);
@@ -76,6 +137,22 @@ function renderUrlHistoryUI() {
   );
 }
 
+function fmtDate(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+}
 function shortenUrl(url) {
   try {
     const u = new URL(url);
@@ -168,21 +245,33 @@ async function renderHome() {
     renderUrlHistoryUI();
   });
 
-  // Seed history from prior download jobs (server) once, then keep browser-local.
-  api("/api/jobs?limit=50")
-    .then((jobs) => {
-      const existing = new Set(loadUrlHistory());
-      let changed = false;
+  $("#clear-job-errors")?.addEventListener("click", async () => {
+    try {
+      await api("/api/jobs/errors", { method: "DELETE" });
+      await refreshJobsAndLibrary();
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  // Seed history from prior download jobs (server), then enrich titles from library.
+  Promise.all([api("/api/jobs?limit=50"), api("/api/videos")])
+    .then(([jobs, videos]) => {
+      const existing = loadUrlHistory();
+      const byUrl = new Map(existing.map((e) => [e.url, e]));
       for (const job of jobs) {
-        if (job.url && !existing.has(job.url)) {
-          existing.add(job.url);
-          changed = true;
-        }
+        if (!job.url) continue;
+        const prev = byUrl.get(job.url);
+        byUrl.set(job.url, {
+          url: job.url,
+          title: prev?.title || null,
+          youtube_id: job.youtube_id || prev?.youtube_id || youtubeIdFromUrl(job.url),
+          added_at: prev?.added_at || job.created_at || new Date().toISOString(),
+        });
       }
-      if (changed) {
-        saveUrlHistory([...existing].slice(0, URL_HISTORY_MAX));
-        renderUrlHistoryUI();
-      }
+      saveUrlHistory([...byUrl.values()]);
+      if (enrichUrlHistoryFromVideos(videos)) renderUrlHistoryUI();
+      else renderUrlHistoryUI();
     })
     .catch(() => {});
 
@@ -201,15 +290,20 @@ async function renderHome() {
           language: lang.value,
         }),
       });
-      rememberUrl(url);
+      rememberUrl(url, {
+        youtube_id: job.youtube_id || youtubeIdFromUrl(url),
+        added_at: new Date().toISOString(),
+      });
       localStorage.setItem(LANG_PREF_KEY, lang.value);
       renderUrlHistoryUI();
       status.textContent = `Queued — ${job.message}`;
       $("#url").value = "";
       await refreshJobsAndLibrary();
     } catch (err) {
-      // Still remember the URL so a failed attempt is easy to retry.
-      rememberUrl(url);
+      rememberUrl(url, {
+        youtube_id: youtubeIdFromUrl(url),
+        added_at: new Date().toISOString(),
+      });
       renderUrlHistoryUI();
       status.classList.add("error");
       status.textContent = err.message;
@@ -224,37 +318,43 @@ async function renderHome() {
 
 async function refreshJobsAndLibrary() {
   const libraryEl = $("#library");
+  const jobPanel = $("#job-panel");
   const jobList = $("#job-list");
+  const clearErrorsBtn = $("#clear-job-errors");
   if (!libraryEl) return;
 
   try {
-    const [videos, jobs] = await Promise.all([api("/api/videos"), api("/api/jobs?limit=8")]);
+    const [videos, jobs] = await Promise.all([api("/api/videos"), api("/api/jobs?limit=20")]);
+    if (enrichUrlHistoryFromVideos(videos)) renderUrlHistoryUI();
+
     const active = jobs.filter((j) => j.status === "queued" || j.status === "running");
-    const recentErrors = jobs.filter((j) => j.status === "error").slice(0, 3);
-    const softWarnings = jobs
-      .filter((j) => j.status === "done" && j.error)
-      .slice(0, 2);
+    const recentErrors = jobs.filter((j) => j.status === "error");
+    const softWarnings = jobs.filter((j) => j.status === "done" && j.error);
+    const hasClearable = recentErrors.length + softWarnings.length > 0;
 
     if (active.length || recentErrors.length || softWarnings.length) {
-      jobList.hidden = false;
+      jobPanel.hidden = false;
+      if (clearErrorsBtn) clearErrorsBtn.hidden = !hasClearable;
       jobList.replaceChildren(
         ...[...active, ...recentErrors, ...softWarnings].map((job) => {
           const el = document.createElement("div");
           const isError = job.status === "error";
           el.className = `job${isError ? " error" : ""}`;
+          const when = job.created_at ? fmtDate(job.created_at) : "";
           if (job.status === "done" && job.error) {
-            el.textContent = `${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
+            el.textContent = `${when ? when + " — " : ""}${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
           } else if (isError) {
-            el.textContent = `Failed (${job.youtube_id || "video"}): ${job.error || job.message}`;
+            el.textContent = `${when ? when + " — " : ""}Failed (${job.youtube_id || "video"}): ${job.error || job.message}`;
           } else {
-            el.textContent = `${job.stage}: ${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
+            el.textContent = `${when ? when + " — " : ""}${job.stage}: ${job.message}${job.youtube_id ? ` · ${job.youtube_id}` : ""}`;
           }
           return el;
         })
       );
     } else {
-      jobList.hidden = true;
+      jobPanel.hidden = true;
       jobList.replaceChildren();
+      if (clearErrorsBtn) clearErrorsBtn.hidden = true;
     }
 
     if (!videos.length) {
@@ -272,14 +372,20 @@ async function refreshJobsAndLibrary() {
           ? `<img class="thumb" src="${v.thumbnail_url}" alt="" loading="lazy" />`
           : `<div class="thumb placeholder">No thumb</div>`;
 
+        const subsBtns = v.has_subs
+          ? `<a class="btn ghost" href="${v.subs_vtt_url}" download>VTT</a>
+             <a class="btn ghost" href="${v.subs_json_url}" download>JSON</a>`
+          : "";
+
         row.innerHTML = `
           ${thumb}
           <div class="video-info">
             <h3>${escapeHtml(v.title)}</h3>
-            <p>${fmtTime(v.duration)} · ${v.has_subs ? "subs indexed" : "no subs"} · ${escapeHtml(v.youtube_id)}</p>
+            <p>${fmtDate(v.created_at)} · ${fmtTime(v.duration)} · ${v.has_subs ? "subs indexed" : "no subs"} · ${escapeHtml(v.youtube_id)}</p>
           </div>
           <div class="video-actions">
             <a class="btn primary" href="#/watch/${v.id}" data-link>Watch</a>
+            ${subsBtns}
             <button type="button" class="btn ghost" data-delete="${v.id}">Delete</button>
           </div>
         `;
@@ -320,7 +426,16 @@ async function renderWatch(videoId, params) {
   }
 
   $("#watch-title").textContent = video.title;
-  $("#watch-meta").textContent = `${fmtTime(video.duration)} · ${video.has_subs ? `${cues.length} cues` : "no subtitles"}`;
+  $("#watch-meta").textContent = `${fmtDate(video.created_at)} · ${fmtTime(video.duration)} · ${video.has_subs ? `${cues.length} cues` : "no subtitles"}`;
+
+  const watchActions = $("#watch-actions");
+  if (video.has_subs && video.subs_vtt_url && video.subs_json_url) {
+    watchActions.hidden = false;
+    $("#download-subs-vtt").href = video.subs_vtt_url;
+    $("#download-subs-json").href = video.subs_json_url;
+  } else if (watchActions) {
+    watchActions.hidden = true;
+  }
 
   if (video.video_url) {
     player.src = video.video_url;

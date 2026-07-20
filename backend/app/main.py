@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -70,6 +70,8 @@ class VideoOut(BaseModel):
     has_subs: bool
     thumbnail_url: str | None
     video_url: str | None
+    subs_vtt_url: str | None = None
+    subs_json_url: str | None = None
     created_at: str
     error: str | None = None
 
@@ -567,18 +569,22 @@ def write_vtt(directory: Path, youtube_id: str, cues: list[dict[str, Any]]) -> P
 def row_to_video(row: sqlite3.Row) -> VideoOut:
     youtube_id = row["youtube_id"]
     has_video = bool(row["has_video"])
+    has_subs = bool(row["has_subs"])
     thumb = THUMBS_DIR / f"{youtube_id}.jpg"
+    video_id = row["id"]
     return VideoOut(
-        id=row["id"],
+        id=video_id,
         youtube_id=youtube_id,
         title=row["title"],
         duration=row["duration"],
         language=row["language"],
         status=row["status"],
         has_video=has_video,
-        has_subs=bool(row["has_subs"]),
+        has_subs=has_subs,
         thumbnail_url=f"/media/thumbs/{youtube_id}.jpg" if thumb.exists() else None,
         video_url=f"/media/videos/{youtube_id}/{youtube_id}.mp4" if has_video else None,
+        subs_vtt_url=f"/api/videos/{video_id}/subs/vtt" if has_subs else None,
+        subs_json_url=f"/api/videos/{video_id}/subs/json" if has_subs else None,
         created_at=row["created_at"],
         error=row["error"],
     )
@@ -997,6 +1003,83 @@ def get_job(job_id: str) -> JobOut:
     if not row:
         raise HTTPException(404, "Job not found")
     return row_to_job(row)
+
+
+@app.delete("/api/jobs/errors")
+def clear_error_jobs() -> dict[str, int]:
+    """Remove failed jobs and completed jobs with subtitle warnings from the log."""
+    with get_db() as conn:
+        cur = conn.execute(
+            """
+            DELETE FROM jobs
+            WHERE status = 'error'
+               OR (status = 'done' AND error IS NOT NULL AND error != '')
+            """
+        )
+        return {"deleted": cur.rowcount}
+
+
+@app.get("/api/videos/{video_id}/subs/vtt")
+def download_subs_vtt(video_id: str):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT youtube_id, title, has_subs FROM videos WHERE id = ?", (video_id,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Video not found")
+    if not row["has_subs"]:
+        raise HTTPException(404, "No subtitles for this video")
+    youtube_id = row["youtube_id"]
+    path = VIDEOS_DIR / youtube_id / f"{youtube_id}.vtt"
+    if not path.exists():
+        raise HTTPException(404, "Subtitle file not found")
+    safe_title = re.sub(r"[^\w\s-]", "", row["title"])[:60].strip() or youtube_id
+    filename = f"{safe_title}.vtt"
+    return FileResponse(
+        path,
+        media_type="text/vtt",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/videos/{video_id}/subs/json")
+def download_subs_json(video_id: str):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT youtube_id, title, has_subs FROM videos WHERE id = ?", (video_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Video not found")
+        if not row["has_subs"]:
+            raise HTTPException(404, "No subtitles for this video")
+        cues = conn.execute(
+            "SELECT start, end, text FROM cues WHERE video_id = ? ORDER BY start ASC",
+            (video_id,),
+        ).fetchall()
+    youtube_id = row["youtube_id"]
+    path = VIDEOS_DIR / youtube_id / f"{youtube_id}.cues.json"
+    if path.exists():
+        safe_title = re.sub(r"[^\w\s-]", "", row["title"])[:60].strip() or youtube_id
+        filename = f"{safe_title}.cues.json"
+        return FileResponse(
+            path,
+            media_type="application/json",
+            filename=filename,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    # Fallback: build from DB
+    payload = [{"start": r["start"], "end": r["end"], "text": r["text"]} for r in cues]
+    if not payload:
+        raise HTTPException(404, "No subtitle cues found")
+    safe_title = re.sub(r"[^\w\s-]", "", row["title"])[:60].strip() or youtube_id
+    filename = f"{safe_title}.cues.json"
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/search", response_model=list[SearchHit])
