@@ -22,6 +22,8 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from backend.app import obsidian_concepts as oc
+
 ROOT = Path(os.environ.get("YT_EXTRACTOR_ROOT", Path(__file__).resolve().parents[2]))
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
 VIDEOS_DIR = DATA_DIR / "videos"
@@ -97,6 +99,28 @@ class SearchHit(BaseModel):
     end: float
     text: str
     snippet: str
+
+
+class SettingsOut(BaseModel):
+    obsidian_concepts_base_url: str = ""
+    obsidian_concepts_import_path: str = "/api/videos/import"
+    obsidian_concepts_enabled: bool = False
+    # Never echo the full API key back — only whether one is set.
+    obsidian_concepts_api_key_set: bool = False
+
+
+class SettingsUpdate(BaseModel):
+    obsidian_concepts_base_url: str | None = None
+    obsidian_concepts_import_path: str | None = None
+    obsidian_concepts_api_key: str | None = None
+
+
+class ImportResult(BaseModel):
+    ok: bool
+    status_code: int | None = None
+    url: str | None = None
+    response: Any = None
+    message: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -897,6 +921,7 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     js_name, js_path = detect_js_runtime()
+    settings = oc.load_settings(DATA_DIR)
     return {
         "ok": True,
         "docker": docker_available(),
@@ -907,7 +932,78 @@ def health() -> dict[str, Any]:
         "ffmpeg": shutil.which("ffmpeg") is not None,
         "js_runtime": js_name,
         "js_runtime_path": js_path,
+        "obsidian_concepts_enabled": settings["obsidian_concepts_enabled"],
+        "obsidian_concepts_base_url": settings["obsidian_concepts_base_url"],
     }
+
+
+def _settings_out() -> SettingsOut:
+    cfg = oc.load_settings(DATA_DIR)
+    return SettingsOut(
+        obsidian_concepts_base_url=cfg["obsidian_concepts_base_url"],
+        obsidian_concepts_import_path=cfg["obsidian_concepts_import_path"],
+        obsidian_concepts_enabled=cfg["obsidian_concepts_enabled"],
+        obsidian_concepts_api_key_set=bool(cfg.get("obsidian_concepts_api_key")),
+    )
+
+
+@app.get("/api/settings", response_model=SettingsOut)
+def get_settings() -> SettingsOut:
+    return _settings_out()
+
+
+@app.put("/api/settings", response_model=SettingsOut)
+def put_settings(body: SettingsUpdate) -> SettingsOut:
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    oc.save_settings(DATA_DIR, updates)
+    return _settings_out()
+
+
+@app.get("/api/integrations/obsidian-concepts/status")
+async def obsidian_concepts_status() -> dict[str, Any]:
+    return await oc.probe(DATA_DIR)
+
+
+@app.post("/api/videos/{video_id}/export/obsidian-concepts", response_model=ImportResult)
+async def export_to_obsidian_concepts(video_id: str) -> ImportResult:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Video not found")
+        cues_rows = conn.execute(
+            "SELECT start, end, text FROM cues WHERE video_id = ? ORDER BY start ASC",
+            (video_id,),
+        ).fetchall()
+
+    youtube_id = row["youtube_id"]
+    vtt_path = VIDEOS_DIR / youtube_id / f"{youtube_id}.vtt"
+    vtt_text = vtt_path.read_text(encoding="utf-8") if vtt_path.exists() else None
+    cues = [
+        {"start": r["start"], "end": r["end"], "text": r["text"]} for r in cues_rows
+    ]
+    payload = oc.build_import_payload(
+        youtube_id=youtube_id,
+        title=row["title"],
+        duration=row["duration"],
+        language=row["language"],
+        cues=cues,
+        vtt=vtt_text,
+        created_at=row["created_at"],
+    )
+    try:
+        result = await oc.import_video(DATA_DIR, payload)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"Import failed: {exc}") from exc
+
+    return ImportResult(
+        ok=True,
+        status_code=result.get("status_code"),
+        url=result.get("url"),
+        response=result.get("response"),
+        message="Imported into Obsidian Concepts",
+    )
 
 
 @app.post("/api/download", response_model=JobOut)

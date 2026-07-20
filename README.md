@@ -64,14 +64,29 @@ Scripts create a project **`.venv`** automatically (required on Homebrew Python 
 
 **Note:** Subtitles are fetched separately with retries — a YouTube 429 on captions will still keep the MP4.
 
-## Background start (macOS)
+## Obsidian Concepts import
+
+Send a library video (title, YouTube URL, transcript cues, VTT) to your local
+**obsidian_concepts** app:
+
+1. Open **Settings** in the web UI
+2. Set the Concepts base URL (e.g. `http://127.0.0.1:8100`)
+3. Adjust the import path if needed (default `/api/videos/import`)
+4. Use **Concepts** on a library row or **Import to Concepts** on the watch page
+
+Or via env / `data/settings.json`:
 
 ```bash
-./scripts/restart.sh        # stop + start in background
-./scripts/restart.sh status
-./scripts/stop.sh
-tail -f data/yt-extractor.log
+export OBSIDIAN_CONCEPTS_BASE_URL=http://127.0.0.1:8100
+export OBSIDIAN_CONCEPTS_IMPORT_PATH=/api/videos/import
+# optional:
+export OBSIDIAN_CONCEPTS_API_KEY=…
+./scripts/restart.sh
 ```
+
+Default POST body includes `youtube_url`, `title`, `transcript`/`cues`, and `vtt`.
+If your Concepts API expects a different path or shape, set the path in Settings
+(or share the OpenAPI and we can align the payload).
 
 ## Usage
 

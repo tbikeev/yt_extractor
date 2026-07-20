@@ -22,6 +22,7 @@
       <nav class="nav">
         <a href="#/" data-link class="nav-link" data-nav="library">Library</a>
         <a href="#/search" data-link class="nav-link" data-nav="search">Search</a>
+        <a href="#/settings" data-link class="nav-link" data-nav="settings">Settings</a>
       </nav>
     </header>
 
@@ -96,6 +97,7 @@
           <div class="watch-actions" id="watch-actions" hidden>
             <a class="btn ghost" id="download-subs-vtt" href="#" download>Download VTT</a>
             <a class="btn ghost" id="download-subs-json" href="#" download>Download JSON</a>
+            <button type="button" class="btn ghost" id="import-concepts" hidden>Import to Concepts</button>
           </div>
         </div>
         <aside class="transcript-pane">
@@ -123,6 +125,38 @@
         <button type="submit" class="btn primary">Search</button>
       </form>
       <div id="search-results" class="search-results"></div>
+    </section>
+  </template>
+
+  <template id="tpl-settings">
+    <section class="settings-page">
+      <div class="section-head">
+        <h1>Settings</h1>
+        <p>Connect YT Extractor to your local Obsidian Concepts app.</p>
+      </div>
+      <form class="settings-form" id="settings-form">
+        <label>
+          Obsidian Concepts base URL
+          <input id="oc-base-url" type="url" placeholder="http://127.0.0.1:8100" autocomplete="off" />
+        </label>
+        <label>
+          Import API path
+          <input id="oc-import-path" type="text" placeholder="/api/videos/import" autocomplete="off" />
+        </label>
+        <label>
+          API key <span class="muted">(optional)</span>
+          <input id="oc-api-key" type="password" placeholder="Leave blank to keep unchanged" autocomplete="off" />
+        </label>
+        <div class="form-row">
+          <button type="submit" class="btn primary">Save</button>
+          <button type="button" class="btn ghost" id="oc-probe">Test connection</button>
+        </div>
+        <p class="form-status" id="settings-status" hidden></p>
+      </form>
+      <p class="settings-hint">
+        Import posts title, YouTube URL, transcript cues, and VTT to
+        <code>{base}{path}</code>. Override the path if your Concepts API differs.
+      </p>
     </section>
   </template>
 
