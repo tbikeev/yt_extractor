@@ -60,7 +60,18 @@ USE_DOCKER=never brew install python ffmpeg yt-dlp node
 USE_DOCKER=never ./scripts/dev.sh
 ```
 
+Scripts create a project **`.venv`** automatically (required on Homebrew Python 3.11+).
+
 **Note:** Subtitles are fetched separately with retries — a YouTube 429 on captions will still keep the MP4.
+
+## Background start (macOS)
+
+```bash
+./scripts/restart.sh        # stop + start in background
+./scripts/restart.sh status
+./scripts/stop.sh
+tail -f data/yt-extractor.log
+```
 
 ## Usage
 
