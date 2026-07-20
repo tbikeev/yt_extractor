@@ -53,7 +53,13 @@ ensure_venv() {
 
   if [[ ! -d "$VENV_DIR" ]]; then
     echo "Creating virtualenv at ${VENV_DIR} …"
-    "$bootstrap_py" -m venv "$VENV_DIR"
+    if ! "$bootstrap_py" -m venv "$VENV_DIR"; then
+      echo ""
+      echo "ERROR: Could not create virtualenv."
+      echo "  brew install python   # macOS"
+      echo "  apt install python3-venv   # Debian/Ubuntu"
+      exit 1
+    fi
   fi
 
   # shellcheck disable=SC1091
