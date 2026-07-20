@@ -1,11 +1,4 @@
 services:
-  downloader:
-    build:
-      context: .
-      dockerfile: downloader/Dockerfile
-    image: yt-extractor-downloader
-    profiles: ["tools"]
-
   web:
     build:
       context: .
@@ -15,13 +8,13 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/data
-      # Optional: uncomment to let the app spawn the downloader container
-      # - /var/run/docker.sock:/var/run/docker.sock
+      # Needed so the web app can spawn jauderho/yt-dlp containers
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       DATA_DIR: /data
       YT_EXTRACTOR_ROOT: /app
-      USE_DOCKER: never
-      DOWNLOADER_IMAGE: yt-extractor-downloader
+      USE_DOCKER: auto
+      DOWNLOADER_IMAGE: jauderho/yt-dlp
       HOST: 0.0.0.0
       PORT: "8080"
     restart: unless-stopped

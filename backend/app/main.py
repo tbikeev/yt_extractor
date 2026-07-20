@@ -30,8 +30,10 @@ JOBS_DIR = DATA_DIR / "jobs"
 DB_PATH = DATA_DIR / "library.db"
 FRONTEND_DIR = ROOT / "frontend"
 
-DOWNLOADER_IMAGE = os.environ.get("DOWNLOADER_IMAGE", "yt-extractor-downloader")
+# Prefer the same public image used by ~/…/ytdl-docker (jauderho/yt-dlp has deno + curl_cffi).
+DOWNLOADER_IMAGE = os.environ.get("DOWNLOADER_IMAGE", "jauderho/yt-dlp")
 USE_DOCKER = os.environ.get("USE_DOCKER", "auto")  # auto | always | never
+DOCKER_WORKDIR = "/workdir"
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -287,7 +289,11 @@ def missing_js_runtime_message() -> str:
 
 def common_ytdlp_flags() -> list[str]:
     """Shared robustness flags for YouTube (JS runtime, retries, rate limits)."""
-    runtime = js_runtime_args()
+    if should_use_docker():
+        # jauderho/yt-dlp ships deno (+ curl_cffi). Do not pass a host Node path into the container.
+        runtime = ["--js-runtimes", "deno"]
+    else:
+        runtime = js_runtime_args()
     flags = [
         "--no-playlist",
         "--retries",
@@ -307,35 +313,59 @@ def common_ytdlp_flags() -> list[str]:
     return flags
 
 
+def docker_uid_gid() -> str:
+    try:
+        return f"{os.getuid()}:{os.getgid()}"
+    except AttributeError:
+        # Windows fallback — image still runs as root in container.
+        return "0:0"
+
+
 def yt_dlp_cmd(args: list[str], workdir: Path) -> list[str]:
-    """Build either a dockerized or local yt-dlp command."""
-    # Prefer invoking yt-dlp via the same Python that runs the app, so upgrades
-    # from `pip install -U yt-dlp` are used even if an old brew binary is first on PATH.
-    ytdlp_bin = shutil.which("yt-dlp")
-    py_module = [sys.executable, "-m", "yt_dlp"]
-    base: list[str]
+    """Build either a dockerized or local yt-dlp command.
+
+    Docker mode mirrors the local ytdl-docker helper:
+      docker run --rm -u $(id -u):$(id -g) -v "$PWD":/workdir jauderho/yt-dlp -P /workdir …
+    """
     if should_use_docker():
-        base = [
+        return [
             "docker",
             "run",
             "--rm",
+            "-u",
+            docker_uid_gid(),
             "-v",
-            f"{workdir.resolve()}:/out",
+            f"{workdir.resolve()}:{DOCKER_WORKDIR}",
             "-w",
-            "/out",
+            DOCKER_WORKDIR,
             DOWNLOADER_IMAGE,
+            "-P",
+            DOCKER_WORKDIR,
+            *args,
         ]
-    else:
-        # python -m yt_dlp is more reliable across venvs / brew mixes
-        try:
-            import yt_dlp  # noqa: F401
 
-            base = py_module
-        except ImportError:
-            if not ytdlp_bin:
-                raise RuntimeError("yt-dlp is not installed")
-            base = [ytdlp_bin]
-    return [*base, *args]
+    # Prefer invoking yt-dlp via the same Python that runs the app.
+    try:
+        import yt_dlp  # noqa: F401
+
+        return [sys.executable, "-m", "yt_dlp", *args]
+    except ImportError:
+        ytdlp_bin = shutil.which("yt-dlp")
+        if not ytdlp_bin:
+            raise RuntimeError("yt-dlp is not installed")
+        return [ytdlp_bin, *args]
+
+
+def ensure_downloader_image() -> tuple[bool, str]:
+    """Return (ok, detail). Pulls jauderho/yt-dlp if missing."""
+    inspect = run_cmd(["docker", "image", "inspect", DOWNLOADER_IMAGE], timeout=30)
+    if inspect.returncode == 0:
+        return True, f"image ready: {DOWNLOADER_IMAGE}"
+    pull = run_cmd(["docker", "pull", DOWNLOADER_IMAGE], timeout=600)
+    if pull.returncode == 0:
+        return True, f"pulled: {DOWNLOADER_IMAGE}"
+    return False, cmd_output(pull)[-800:] or f"Failed to pull {DOWNLOADER_IMAGE}"
+
 
 
 def run_cmd(cmd: list[str], cwd: Path | None = None, timeout: int = 3600) -> subprocess.CompletedProcess[str]:
@@ -583,9 +613,7 @@ def update_job(job_id: str, **fields: Any) -> None:
 
 
 def out_template(youtube_id: str) -> str:
-    # Inside the downloader container the workdir is /out (volume-mounted).
-    if should_use_docker():
-        return f"/out/{youtube_id}.%(ext)s"
+    # With docker -P /workdir, a relative template is enough.
     return f"{youtube_id}.%(ext)s"
 
 
@@ -661,24 +689,31 @@ async def process_download(job_id: str, url: str, language: str) -> None:
         update_job(job_id, status="error", stage="parse", message=str(exc), error=str(exc))
         return
 
-    js_name, js_path = detect_js_runtime()
-    if not js_name and not should_use_docker():
+    js_name, _js_path = detect_js_runtime()
+    using_docker = should_use_docker()
+    if not js_name and not using_docker:
         update_job(
             job_id,
             youtube_id=youtube_id,
             status="error",
             stage="download",
-            message="Node.js required",
-            error=missing_js_runtime_message(),
+            message="Node.js or Docker required",
+            error=(
+                missing_js_runtime_message()
+                + "\n\nOr use Docker (recommended on macOS):\n"
+                "  docker pull jauderho/yt-dlp\n"
+                "  USE_DOCKER=auto ./scripts/dev.sh"
+            ),
         )
         return
 
+    mode = f"docker:{DOWNLOADER_IMAGE}" if using_docker else f"JS:{js_name}"
     update_job(
         job_id,
         youtube_id=youtube_id,
         status="running",
         stage="download",
-        message=f"Downloading video… (JS: {js_name or 'docker'})",
+        message=f"Downloading video… ({mode})",
     )
 
     out_dir = video_dir(youtube_id)
@@ -853,6 +888,55 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.post("/api/download", response_model=JobOut)
+async def start_download(body: DownloadRequest) -> JobOut:
+    try:
+        youtube_id = extract_youtube_id(body.url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if should_use_docker():
+        ok, detail = await asyncio.to_thread(ensure_downloader_image)
+        if not ok:
+            raise HTTPException(
+                503,
+                f"Docker downloader image '{DOWNLOADER_IMAGE}' is not available.\n"
+                f"Run: docker pull {DOWNLOADER_IMAGE}\n\n{detail}",
+            )
+    else:
+        js_name, _ = detect_js_runtime()
+        if not js_name:
+            raise HTTPException(
+                503,
+                missing_js_runtime_message()
+                + f"\n\nOr enable Docker downloads:\n  docker pull {DOWNLOADER_IMAGE}\n"
+                "  USE_DOCKER=auto ./scripts/dev.sh",
+            )
+        if not shutil.which("yt-dlp"):
+            try:
+                import yt_dlp  # noqa: F401
+            except ImportError as exc:
+                raise HTTPException(
+                    503,
+                    "yt-dlp not found. Install with: python3 -m pip install -U yt-dlp",
+                ) from exc
+
+    job_id = str(uuid.uuid4())
+    ts = now_iso()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO jobs (id, youtube_id, url, status, stage, message, video_id, error, created_at, updated_at)
+            VALUES (?, ?, ?, 'queued', 'queued', 'Queued', NULL, NULL, ?, ?)
+            """,
+            (job_id, youtube_id, body.url.strip(), ts, ts),
+        )
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+
+    asyncio.create_task(process_download(job_id, body.url.strip(), body.language))
+    return row_to_job(row)
+
+
 @app.get("/api/videos", response_model=list[VideoOut])
 def list_videos() -> list[VideoOut]:
     with get_db() as conn:
@@ -895,52 +979,6 @@ def delete_video(video_id: str) -> dict[str, str]:
     shutil.rmtree(VIDEOS_DIR / youtube_id, ignore_errors=True)
     (THUMBS_DIR / f"{youtube_id}.jpg").unlink(missing_ok=True)
     return {"status": "deleted"}
-
-
-@app.post("/api/download", response_model=JobOut)
-async def start_download(body: DownloadRequest) -> JobOut:
-    try:
-        youtube_id = extract_youtube_id(body.url)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-
-    if not should_use_docker():
-        js_name, _ = detect_js_runtime()
-        if not js_name:
-            raise HTTPException(503, missing_js_runtime_message())
-        if not shutil.which("yt-dlp"):
-            try:
-                import yt_dlp  # noqa: F401
-            except ImportError as exc:
-                raise HTTPException(
-                    503,
-                    "yt-dlp not found. Install with: python3 -m pip install -U yt-dlp",
-                ) from exc
-    else:
-        check = await asyncio.to_thread(
-            run_cmd, ["docker", "image", "inspect", DOWNLOADER_IMAGE], timeout=30
-        )
-        if check.returncode != 0:
-            raise HTTPException(
-                503,
-                f"Docker downloader image '{DOWNLOADER_IMAGE}' not found. "
-                "Run: docker compose build downloader",
-            )
-
-    job_id = str(uuid.uuid4())
-    ts = now_iso()
-    with get_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO jobs (id, youtube_id, url, status, stage, message, video_id, error, created_at, updated_at)
-            VALUES (?, ?, ?, 'queued', 'queued', 'Queued', NULL, NULL, ?, ?)
-            """,
-            (job_id, youtube_id, body.url.strip(), ts, ts),
-        )
-        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-
-    asyncio.create_task(process_download(job_id, body.url.strip(), body.language))
-    return row_to_job(row)
 
 
 @app.get("/api/jobs", response_model=list[JobOut])
