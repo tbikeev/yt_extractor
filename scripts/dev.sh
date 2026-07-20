@@ -72,4 +72,7 @@ fi
 mkdir -p "$DATA_DIR/videos" "$DATA_DIR/thumbs" "$DATA_DIR/jobs"
 echo "Starting YT Extractor on http://${HOST}:${PORT}"
 echo "Check: curl -s http://127.0.0.1:${PORT}/api/health"
+if [[ "${NO_RELOAD:-}" == "1" ]]; then
+  exec "$PYTHON" -m uvicorn backend.app.main:app --host "$HOST" --port "$PORT"
+fi
 exec "$PYTHON" -m uvicorn backend.app.main:app --host "$HOST" --port "$PORT" --reload
