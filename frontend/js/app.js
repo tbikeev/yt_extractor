@@ -2,6 +2,7 @@ const view = document.getElementById("view");
 const tplHome = document.getElementById("tpl-home");
 const tplWatch = document.getElementById("tpl-watch");
 const tplSearch = document.getElementById("tpl-search");
+const tplSettings = document.getElementById("tpl-settings");
 
 const URL_HISTORY_KEY = "yt_extractor.url_history";
 const LANG_PREF_KEY = "yt_extractor.language";
@@ -11,6 +12,7 @@ let pollTimer = null;
 let activeCueObserver = null;
 let lastLibraryKey = "";
 let lastJobsKey = "";
+let conceptsEnabled = false;
 
 function loadUrlHistory() {
   try {
@@ -184,8 +186,44 @@ function setMode(mode) {
   document.body.classList.toggle("mode-watch", mode === "watch");
   document.querySelectorAll("[data-nav]").forEach((el) => {
     const nav = el.getAttribute("data-nav");
-    el.classList.toggle("active", (mode === "home" && nav === "library") || mode === nav);
+    el.classList.toggle(
+      "active",
+      (mode === "home" && nav === "library") || mode === nav
+    );
   });
+}
+
+async function refreshConceptsEnabled() {
+  try {
+    const s = await api("/api/settings");
+    conceptsEnabled = !!s.obsidian_concepts_enabled;
+  } catch {
+    conceptsEnabled = false;
+  }
+  return conceptsEnabled;
+}
+
+async function importToConcepts(videoId, btn) {
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Importing…";
+  try {
+    const result = await api(`/api/videos/${videoId}/export/obsidian-concepts`, {
+      method: "POST",
+    });
+    btn.textContent = "Imported ✓";
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.disabled = false;
+    }, 2000);
+    return result;
+  } catch (err) {
+    btn.textContent = original;
+    btn.disabled = false;
+    alert(err.message);
+    throw err;
+  }
 }
 
 async function api(path, options = {}) {
@@ -224,6 +262,8 @@ function route() {
     renderWatch(parts[1], new URLSearchParams(query || ""));
   } else if (parts[0] === "search") {
     renderSearch(new URLSearchParams(query || ""));
+  } else if (parts[0] === "settings") {
+    renderSettings();
   } else {
     renderHome();
   }
@@ -232,6 +272,7 @@ function route() {
 async function renderHome() {
   setMode("home");
   view.replaceChildren(tplHome.content.cloneNode(true));
+  await refreshConceptsEnabled();
 
   const form = $("#download-form");
   const status = $("#form-status");
@@ -402,6 +443,9 @@ function renderLibrary(videos, { animate = false } = {}) {
         ? `<a class="btn ghost" href="${v.subs_vtt_url}" download="${escapeHtml(v.title)}.vtt">VTT</a>
            <a class="btn ghost" href="${v.subs_json_url}" download="${escapeHtml(v.title)}.json">JSON</a>`
         : "";
+      const conceptsBtn = conceptsEnabled
+        ? `<button type="button" class="btn ghost" data-import-concepts="${v.id}">Concepts</button>`
+        : "";
 
       row.innerHTML = `
         ${thumb}
@@ -412,6 +456,7 @@ function renderLibrary(videos, { animate = false } = {}) {
         <div class="video-actions">
           <a class="btn primary" href="#/watch/${v.id}" data-link>Watch</a>
           ${subsBtns}
+          ${conceptsBtn}
           <button type="button" class="btn ghost" data-delete="${v.id}">Delete</button>
         </div>
       `;
@@ -421,6 +466,10 @@ function renderLibrary(videos, { animate = false } = {}) {
         lastLibraryKey = "";
         await refreshJobsAndLibrary();
       });
+      const importBtn = row.querySelector("[data-import-concepts]");
+      if (importBtn) {
+        importBtn.addEventListener("click", () => importToConcepts(v.id, importBtn));
+      }
       return row;
     })
   );
@@ -457,6 +506,7 @@ async function refreshJobsAndLibrary() {
 async function renderWatch(videoId, params) {
   setMode("watch");
   view.replaceChildren(tplWatch.content.cloneNode(true));
+  await refreshConceptsEnabled();
   $("#back-btn").addEventListener("click", () => {
     location.hash = "#/";
   });
@@ -481,14 +531,29 @@ async function renderWatch(videoId, params) {
   $("#watch-meta").textContent = `${fmtDate(video.created_at)} · ${fmtTime(video.duration)} · ${video.has_subs ? `${cues.length} cues` : "no subtitles"}`;
 
   const watchActions = $("#watch-actions");
-  if (video.has_subs && video.subs_vtt_url && video.subs_json_url) {
+  const showSubs = video.has_subs && video.subs_vtt_url && video.subs_json_url;
+  if (showSubs || conceptsEnabled) {
     watchActions.hidden = false;
-    const vtt = $("#download-subs-vtt");
-    const json = $("#download-subs-json");
-    vtt.href = video.subs_vtt_url;
-    json.href = video.subs_json_url;
-    vtt.setAttribute("download", `${video.title}.vtt`);
-    json.setAttribute("download", `${video.title}.json`);
+    if (showSubs) {
+      const vtt = $("#download-subs-vtt");
+      const json = $("#download-subs-json");
+      vtt.hidden = false;
+      json.hidden = false;
+      vtt.href = video.subs_vtt_url;
+      json.href = video.subs_json_url;
+      vtt.setAttribute("download", `${video.title}.vtt`);
+      json.setAttribute("download", `${video.title}.json`);
+    } else {
+      $("#download-subs-vtt").hidden = true;
+      $("#download-subs-json").hidden = true;
+    }
+    const importBtn = $("#import-concepts");
+    if (conceptsEnabled) {
+      importBtn.hidden = false;
+      importBtn.onclick = () => importToConcepts(video.id, importBtn);
+    } else {
+      importBtn.hidden = true;
+    }
   } else if (watchActions) {
     watchActions.hidden = true;
   }
@@ -573,6 +638,92 @@ async function renderWatch(videoId, params) {
     activeCueObserver = requestAnimationFrame(tick);
   };
   activeCueObserver = requestAnimationFrame(tick);
+}
+
+async function renderSettings() {
+  setMode("settings");
+  view.replaceChildren(tplSettings.content.cloneNode(true));
+  const form = $("#settings-form");
+  const status = $("#settings-status");
+  const baseInput = $("#oc-base-url");
+  const pathInput = $("#oc-import-path");
+  const keyInput = $("#oc-api-key");
+
+  try {
+    const s = await api("/api/settings");
+    baseInput.value = s.obsidian_concepts_base_url || "";
+    pathInput.value = s.obsidian_concepts_import_path || "/api/videos/import";
+    keyInput.placeholder = s.obsidian_concepts_api_key_set
+      ? "•••••••• (saved — leave blank to keep)"
+      : "Optional Bearer token";
+  } catch (err) {
+    status.hidden = false;
+    status.classList.add("error");
+    status.textContent = err.message;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    status.hidden = false;
+    status.classList.remove("error");
+    status.textContent = "Saving…";
+    const body = {
+      obsidian_concepts_base_url: baseInput.value.trim(),
+      obsidian_concepts_import_path: pathInput.value.trim() || "/api/videos/import",
+    };
+    if (keyInput.value.trim()) {
+      body.obsidian_concepts_api_key = keyInput.value.trim();
+    }
+    try {
+      const s = await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      conceptsEnabled = !!s.obsidian_concepts_enabled;
+      keyInput.value = "";
+      keyInput.placeholder = s.obsidian_concepts_api_key_set
+        ? "•••••••• (saved — leave blank to keep)"
+        : "Optional Bearer token";
+      status.textContent = s.obsidian_concepts_enabled
+        ? "Saved — Concepts import is enabled."
+        : "Saved — set a base URL to enable import.";
+    } catch (err) {
+      status.classList.add("error");
+      status.textContent = err.message;
+    }
+  });
+
+  $("#oc-probe").addEventListener("click", async () => {
+    status.hidden = false;
+    status.classList.remove("error");
+    status.textContent = "Testing…";
+    try {
+      // Persist current URL first so probe uses it
+      await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          obsidian_concepts_base_url: baseInput.value.trim(),
+          obsidian_concepts_import_path: pathInput.value.trim() || "/api/videos/import",
+          ...(keyInput.value.trim()
+            ? { obsidian_concepts_api_key: keyInput.value.trim() }
+            : {}),
+        }),
+      });
+      const probe = await api("/api/integrations/obsidian-concepts/status");
+      if (!probe.configured) {
+        status.classList.add("error");
+        status.textContent = "No base URL configured.";
+      } else if (probe.reachable) {
+        status.textContent = `Reachable (${probe.status_code}) via ${probe.probe_url}`;
+      } else {
+        status.classList.add("error");
+        status.textContent = `Not reachable at ${probe.base_url}. Is Concepts running?`;
+      }
+    } catch (err) {
+      status.classList.add("error");
+      status.textContent = err.message;
+    }
+  });
 }
 
 async function renderSearch(params) {
